@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -12,6 +13,8 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <ctype.h>
+#include <sys/poll.h>
+#include <sys/time.h>
 
 struct list
 {
@@ -23,9 +26,20 @@ struct list
    time_t elapsed_time;
 };
 
+struct list2
+{
+   char ip[30];
+   int port;
+   int client_pid;
+   int status;
+   int readfd;
+   int writefd;
+};
+
 static struct list process_list[30];
 static int pointer=0;
 
+static struct list2 client_list[30];
 static int no_of_clients=0;
 
 static void sig_handler(int signo)
@@ -34,12 +48,28 @@ static void sig_handler(int signo)
    int child_pid = waitpid(-1,&status_wait,WNOHANG);
    if(signo==SIGCHLD)
    {
-      for(int i=0; i<30; i++)
+      for(int i=1; i<=pointer; i++)
       {
          if(process_list[i].pid==child_pid)
          {
             process_list[i].status = 0;
             process_list[i].end_time = time(NULL);
+         }
+      }
+   }
+}
+
+static void sig_handler_client(int signo)
+{
+   int status_wait;
+   int child_pid = waitpid(-1,&status_wait,WNOHANG);
+   if(signo==SIGCHLD)
+   {
+      for(int i=1; i<=no_of_clients; i++)
+      {
+         if(client_list[i].pid==child_pid)
+         {
+            client_list[i].status = 0;
          }
       }
    }
@@ -140,6 +170,11 @@ static void run(char* token, int fd)
    }
 
    int fcntl_err = fcntl(pipefd3[1], F_SETFD, FD_CLOEXEC);
+   if(fcntl_err==-1)
+   {
+      perror("fcntl");
+      exit(EXIT_FAILURE);
+   }
 
    __sighandler_t prev_SIGCHLD = signal(SIGCHLD,sig_handler);
    if(*prev_SIGCHLD==SIG_ERR)
@@ -231,7 +266,7 @@ static void display_list(char* token, int fd)
    else if(0 == strcmp(token, "all"))
    {
       int i=1;
-      char temp_list[100];
+      char temp_list[999];
       int count=0;
       while(i<=pointer)
       {
@@ -269,6 +304,15 @@ static void display_list(char* token, int fd)
    else
    {
       write(fd, "list command not given properly\n\0", 32);
+   }
+}
+
+static void kill_all(void)
+{
+   for(int i=1; i<=pointer; i++)
+   {
+      int pid_to_kill=process_list[i].pid;
+      kill(pid_to_kill,SIGTERM);
    }
 }
 
@@ -349,15 +393,11 @@ static void kill_process(char* token, int fd)
    }
 }
 
-int main(void)
+static int make_socket_server()
 {
 
    int sock, length;
    struct sockaddr_in server;
-   struct sockaddr_in client;
-   int msgsock;
-   char buf[1024];
-   int rval;
 
    /* Create socket */
    sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -386,19 +426,159 @@ int main(void)
    printf("Socket has port #%d\n", ntohs(server.sin_port));
    fflush(stdout);
 
-   /* Start accepting connections */
-   listen(sock, 5);
+   return sock;
+}
 
-   char from_client[999];
-   char to_client[999];
+static void display_list_client(char* token, int fd)
+{
+   token = strtok(NULL, " ,\n");
+   if(token == NULL)
+   {
+      write(fd, "please write command again with arguments\n\0", 32);
+   }
+   else if(0 == strcmp(token, "clients"))
+   {
+      int i=1;
+      char temp_list[999];
+      int count=0;
+      while(i<=no_of_clients)
+      {
+         count += sprintf(&temp_list[count], "Client %d: ip: %s port: %d status: %d pid: %d\n", i,client_list[i].ip, client_list[i].port, client_list[i].status, client_list[i].pid);
+         i++;
+      }
+      temp_list[count]= '\0';
+      write(fd, temp_list, count);
+   }
+   else if(0 == strcmp(token, "processes"))
+   {
+      int i=1;
+      char temp_list[999];
+      int count=0;
+      while(i<=pointer)
+      {
+         count += sprintf(&temp_list[count], "Client %d: ip: %s port: %d status: %d pid: %d\n", i,client_list[i].ip, client_list[i].port, client_list[i].status, client_list[i].pid);
+         //add the process list of each client to the buffer also or directly call that function.
+         i++;
+      }
+      temp_list[count]= '\0';
+      write(fd, temp_list, count);
+   }
+   else
+   {
+      write(fd, "list command not given properly\n\0", 32);
+   }
+}
+
+int main(void)
+{
+   int main_sock;
+
+   int msgsock;
+   struct sockaddr_in client;
+   int len = sizeof(client);
+
+   main_sock=make_socket_server();
+
+   /* Start accepting connections */
+   listen(main_sock, 5);
+
+   struct pollfd fds[2];
+   memset(fds, 0, sizeof(fds));
+   int poll_return;
+   int time_out;
+   time_out = (5 * 60 * 1000);
+
+   /*for accepting connections*/
+   fds[0].fd = main_sock;
+   fds[0].events = POLLIN;
+
+   /*for server commands*/
+   fds[1].fd = STDIN_FILENO;
+   fds[1].events = POLLIN;
+
+   poll_return = poll(fds, 2, time_out);
+
+   if (poll_return == -1)
+   {
+      perror ("poll");
+      exit(EXIT_FAILURE);
+   }
+
+   if (poll_return == 0)
+   {
+      printf ("time out!\n");
+   }
+
+   if (fds[0].revents & POLLIN)
+      printf ("socket\n");
+
+   if (fds[1].revents & POLLIN)
+      printf ("read\n");
+
 
    while(1)
    {
-      msgsock = accept(sock, (struct sockaddr*) &client, &length);
-      if (msgsock == -1)
-         perror("accept");
+      /*
 
-      //printf("Socket has ip #%s\n", inet_ntoa(server.sin_addr));
+      char screen_to_server[999];
+
+      while(1)
+      {
+         int read_count5=read(STDIN_FILENO, screen_to_server,999);
+         if(read_count5==-1)
+         {
+            perror("read: ");
+            exit(EXIT_FAILURE);
+         }
+
+         if(read_count5==1)
+         {
+            continue;
+         }
+
+         screen_to_server[read_count5-1]='\0';
+
+      }
+
+      */
+
+      msgsock = accept(main_sock, (struct sockaddr*) &client, &len);
+      if (msgsock == -1)
+      {
+         perror("accept");
+      }
+
+      /*
+
+      pipe_server_read[2];
+      pipe_server_write[2];
+
+      int pipe_err_2 = pipe(pipe_server_read);
+      if(pipe_err_2 == -1)
+      {
+         perror("pipe server");
+         exit(EXIT_SUCCESS);
+      }
+
+      int pipe_err_3 = pipe(pipe_server_write);
+      if(pipe_err_3 == -1)
+      {
+         perror("pipe server");
+         exit(EXIT_SUCCESS);
+      }
+
+      no_of_clients = no_of_clients +1;
+      strcpy(client_list[no_of_clients].ip,inet_ntoa(client.sin_addr));
+      client_list[no_of_clients].port = ntohs(client.sin_port);
+      client_list[no_of_clients].status=1;
+      client_list[no_of_clients].readfd = pipe_server_read[0];
+      client_list[no_of_clients].writefd = pipe_server_write[1];
+
+      */
+
+      char buf2[999];
+      int count7 = sprintf(buf2,"Connected client has ip: %s port: %d\n",inet_ntoa(client.sin_addr),ntohs(client.sin_port));
+      write(STDOUT_FILENO,buf2,count7);
 
       int pid =fork();
       if(pid==-1)
@@ -407,12 +587,43 @@ int main(void)
          exit(EXIT_FAILURE);
       }
 
+      /*
+
+      else if(pid>0)
+      {
+         //parent server
+
+         close(pipe_server_write[0]);
+         close(pipe_server_read[1]);
+
+         char* token2 = strtok(screen_to_server," ,\n");
+
+         if(token2 == NULL)
+         {
+            continue;
+         }
+
+         else if(0 == strcmp(token, "list"))
+         {
+            //todo
+         }
+      }
+
+      */
+
       else if(pid==0)
       {
+         /*
+         close(pipe_server_write[1]);
+         close(pipe_server_read[0]);
+         */
+
+         char from_client[999];
+         char to_client[999];
 
          while(1)
          {
-            //sleep(15); to check interactivity
+            //sleep(30); //to check interactivity
             int read_count1=read(msgsock, from_client,999);
             if(read_count1==-1)
             {
@@ -477,6 +688,7 @@ int main(void)
 
             else if(0 == strcmp(token, "exit"))
             {
+               kill_all();
                write(msgsock,"EXIT\0",5);
                close(msgsock);
                exit(EXIT_SUCCESS);
@@ -484,9 +696,10 @@ int main(void)
 
             else if(0 == strcmp(token, "disconn"))
             {
+               kill_all();
                write(msgsock,"disconn\0",8);
                close(msgsock);
-               break;
+               exit(EXIT_SUCCESS);
             }
 
             else if(0 == strcmp(token, "kill"))
