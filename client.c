@@ -12,66 +12,22 @@
 #include <pthread.h>
 #include <errno.h>
 
-int make_socket(char* token)
-{
-   char* args[30];
-   int c=0;
-   token = strtok(NULL, " ,\n");
-   while(token != NULL)
-   {
-      args[c++] = token;
-      token = strtok(NULL," ,\n");
-   }
-   args[c]=NULL;
-
-   int sock;
-   struct sockaddr_in server;
-   struct hostent *hp;
-
-   /* Create socket */
-   sock = socket(AF_INET, SOCK_STREAM, 0);
-   if (sock < 0)
-   {
-      perror("opening stream socket");
-      exit(1);
-   }
-
-   /* Connect socket using name specified by command line. */
-   server.sin_family = AF_INET;
-   hp = gethostbyname(args[0]);
-   if (hp == 0)
-   {
-      fprintf(stderr, "%s: unknown host\n", args[0]);
-      exit(2);
-   }
-
-   bcopy(hp->h_addr, &server.sin_addr, hp->h_length);
-   server.sin_port = htons(atoi(args[1]));
-
-   if (connect(sock,(struct sockaddr *) &server,sizeof(server)) < 0)
-   {
-      perror("connecting stream socket");
-      exit(1);
-   }
-
-   return sock;
-}
-
-int connect_to_server(void)
+int make_socket(void)
 {
    int sock;
-
-   write(STDOUT_FILENO,"to connect to the server please type:\nconn <ip address> <port>\n",strlen("to connect to the server please type:\nconn <ip address> <port>\n"));
 
    while(1)
    {
-      char buf1[999];
+      write(STDOUT_FILENO,"to connect to the server please type:\nconn <ip address> <port>\n",strlen("to connect to the server please type:\nconn <ip address> <port>\n"));
+
+      char buf1[100];
       int count1;
 
-      count1= read(STDIN_FILENO,buf1,999);
+      count1= read(STDIN_FILENO,buf1,100);
       if(count1==-1)
       {
          perror("read: ");
+         continue;
       }
 
       buf1[count1]='\0';
@@ -85,7 +41,48 @@ int connect_to_server(void)
       }
       else if(0 == strcmp(token, "conn"))
       {
-         sock = make_socket(token);
+         char* args[30];
+         int c=0;
+         token = strtok(NULL, " ,\n");
+         if(token == NULL)
+         {
+            continue;
+         }
+         while(token != NULL)
+         {
+            args[c++] = token;
+            token = strtok(NULL," ,\n");
+         }
+         args[c]=NULL;
+
+         struct sockaddr_in server;
+         struct hostent *hp;
+
+         /* Create socket */
+         sock = socket(AF_INET, SOCK_STREAM, 0);
+         if (sock < 0)
+         {
+            perror("opening stream socket");
+            continue;
+         }
+
+         /* Connect socket using name specified by command line. */
+         server.sin_family = AF_INET;
+         hp = gethostbyname(args[0]);
+         if (hp == 0)
+         {
+            fprintf(stderr, "%s: unknown host\n", args[0]);
+            continue;
+         }
+
+         bcopy(hp->h_addr, &server.sin_addr, hp->h_length);
+         server.sin_port = htons(atoi(args[1]));
+
+         if (connect(sock,(struct sockaddr *) &server,sizeof(server)) < 0)
+         {
+            perror("connecting stream socket");
+            continue;
+         }
          break;
       }
       else
@@ -99,12 +96,15 @@ int connect_to_server(void)
 
 void* user_to_server(void* ptr)
 {
+   pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS,NULL);
+
    int* sock = (int*) ptr;
 
    char to_server[999];
    int read_count1;
 
    write(STDOUT_FILENO,"Please type help to show available commands or just type a command to get started\n",strlen("Please type help to show available commands or just type a command to get started\n"));
+   write(STDOUT_FILENO,"-->",strlen("-->"));
 
    while(1)
    {
@@ -112,7 +112,7 @@ void* user_to_server(void* ptr)
       if(read_count1==-1)
       {
          perror("read: ");
-         exit(EXIT_FAILURE);
+         continue;
       }
 
       to_server[read_count1-1]='\0';
@@ -126,7 +126,7 @@ int main()
    {
       int sock;
 
-      sock = connect_to_server();
+      sock = make_socket();
 
       pthread_t thread1;
 
@@ -147,7 +147,7 @@ int main()
          if(read_count2==-1)
          {
             perror("read: ");
-            exit(EXIT_FAILURE);
+            continue;
          }
          if(strcmp(from_server,"EXIT")==0)
          {
